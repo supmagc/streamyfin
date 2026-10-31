@@ -5,6 +5,8 @@
  * This is a fallback for when the Jellyfin server doesn't have a subtitle provider configured.
  */
 
+import { ORIGINAL_LANGUAGE } from "@/utils/jellyfin/serverVersion";
+
 const OPENSUBTITLES_API_URL = "https://api.opensubtitles.com/api/v1";
 
 export interface OpenSubtitlesSearchParams {
@@ -287,3 +289,94 @@ export const COMMON_SUBTITLE_LANGUAGES = [
   { code: "slv", name: "Slovenian" },
   { code: "ukr", name: "Ukrainian" },
 ];
+
+/**
+ * ISO 639-2/T → /B. Jellyfin's CultureDto.ThreeLetterISOLanguageName carries
+ * .NET-style /T codes ("fra", "deu"), while COMMON_SUBTITLE_LANGUAGES and the
+ * OpenSubtitles 3→2 mapping use /B codes ("fre", "ger") — an unmapped /T code
+ * matches neither the picker nor the fallback search. ron maps to the app
+ * list's existing "rom" entry rather than the standard "rum".
+ */
+const ISO_639_2_T_TO_B: Record<string, string> = {
+  bod: "tib",
+  ces: "cze",
+  cym: "wel",
+  deu: "ger",
+  ell: "gre",
+  eus: "baq",
+  fas: "per",
+  fra: "fre",
+  hye: "arm",
+  isl: "ice",
+  kat: "geo",
+  mkd: "mac",
+  mri: "mao",
+  msa: "may",
+  mya: "bur",
+  nld: "dut",
+  ron: "rom",
+  slk: "slo",
+  sqi: "alb",
+  zho: "chi",
+};
+
+type LanguageCulture = {
+  ThreeLetterISOLanguageName?: string | null;
+  DisplayName?: string | null;
+} | null;
+
+type LanguageSettings = {
+  defaultSubtitleLanguage?: LanguageCulture;
+  defaultAudioLanguage?: LanguageCulture;
+};
+
+const searchCode = (culture: LanguageCulture | undefined) => {
+  // The audio preference can be "the original language", which is no language.
+  if (culture?.ThreeLetterISOLanguageName === ORIGINAL_LANGUAGE) {
+    return undefined;
+  }
+  const raw = culture?.ThreeLetterISOLanguageName?.toLowerCase();
+  if (!raw) return undefined;
+  return ISO_639_2_T_TO_B[raw] ?? raw;
+};
+
+/** The language a subtitle search starts on: the user's subtitle language, else English. */
+export function defaultSubtitleSearchLanguage(
+  settings: LanguageSettings,
+): string {
+  return searchCode(settings.defaultSubtitleLanguage) ?? "eng";
+}
+
+/**
+ * The languages a subtitle search offers, the user's subtitle and audio languages first: the
+ * list is long, and those are the ones they search in.
+ */
+export function subtitleSearchLanguages(
+  settings: LanguageSettings,
+): { code: string; name: string }[] {
+  const preferred: { code: string; name: string }[] = [];
+  for (const culture of [
+    settings.defaultSubtitleLanguage,
+    settings.defaultAudioLanguage,
+  ]) {
+    const code = searchCode(culture);
+    if (!code || preferred.some((l) => l.code === code)) continue;
+    const known = COMMON_SUBTITLE_LANGUAGES.find((l) => l.code === code);
+    preferred.push(known ?? { code, name: culture?.DisplayName ?? code });
+  }
+  return [
+    ...preferred,
+    ...COMMON_SUBTITLE_LANGUAGES.filter(
+      (l) => !preferred.some((p) => p.code === l.code),
+    ),
+  ];
+}
+
+/** The OpenSubtitles key the app may use: turning the lookup off keeps a stored key unused. */
+export function activeOpenSubtitlesApiKey(settings: {
+  openSubtitlesEnabled?: boolean;
+  openSubtitlesApiKey?: string;
+}): string | undefined {
+  if (settings.openSubtitlesEnabled === false) return undefined;
+  return settings.openSubtitlesApiKey?.trim() || undefined;
+}

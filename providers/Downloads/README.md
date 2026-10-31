@@ -40,6 +40,13 @@ When a video download completes, the following are automatically downloaded:
 3. **Cover Images** - Primary item images and series images
 4. **Segments** - Intro and credit skip timestamps
 
+### Subtitles After the Download
+A finished download can gain subtitles: one saved to the server reaches it through the subtitle
+sync, and one from OpenSubtitles goes into it alone. The sync runs whenever the server becomes
+reachable, when the server reports a downloaded item changed, when its page opens, and for two
+minutes after a save the server has not listed yet. It skips a download with a subtitle burned
+in, and does not bring back a file the user removed from it.
+
 ### File Management
 - Automatic cleanup of all associated files (video, subtitles, trickplay)
 - Size calculation including all assets
@@ -131,12 +138,14 @@ providers/Downloads/
 ├── database.ts                # MMKV operations
 ├── fileOperations.ts          # File system operations
 ├── notifications.ts           # Notification helpers
+├── subtitles.ts               # Subtitles added to or removed from a finished download, and the sync
 ├── types.ts                   # TypeScript types
 ├── utils.ts                   # Utility functions
 ├── index.ts                   # Module exports
 ├── hooks/
 │   ├── useDownloadEventHandlers.ts
-│   └── useDownloadOperations.ts
+│   ├── useDownloadOperations.ts
+│   └── useDownloadSubtitleSync.ts
 └── README.md                  # This file
 ```
 

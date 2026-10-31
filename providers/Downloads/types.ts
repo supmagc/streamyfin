@@ -58,6 +58,16 @@ export interface DownloadedItem {
   previewSegments?: MediaTimeSegment[];
   /** The user data for the item. */
   userData: UserData;
+  /**
+   * Indexes of the subtitles added to the download from OpenSubtitles. The server does not have
+   * them, so syncing with it leaves them alone.
+   */
+  localSubtitleIndexes?: number[];
+  /**
+   * The server's subtitle files the user removed from this download, by sidecarKey: syncing with
+   * the server does not bring them back.
+   */
+  removedServerSubtitles?: string[];
 }
 /**
  * Represents a downloaded Season, containing a map of its episodes.

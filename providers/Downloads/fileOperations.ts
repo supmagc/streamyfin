@@ -1,3 +1,4 @@
+import type { MediaStream } from "@jellyfin/sdk/lib/generated-client/models";
 import { Directory, File, Paths } from "expo-file-system";
 import { DOWNLOAD_PART_FILE_SUFFIX } from "@/constants/Downloads";
 import { getAllDownloadedItems, getDownloadedItemById } from "./database";
@@ -95,6 +96,16 @@ function deleteSidecars(
   if (!usedElsewhere.has(trickplay)) {
     removeFromDocuments(Directory, trickplay, "Trickplay directory");
   }
+}
+
+/** Deletes the file of one of a download's subtitles, unless another download uses it too. */
+export function deleteDownloadSubtitleFile(
+  owner: FileOwner,
+  stream: MediaStream,
+): void {
+  const name = subtitleFileName(owner.item, stream);
+  if (namesUsedByOthers({ finished: owner.item.Id }).has(name)) return;
+  removeFromDocuments(File, name, "Subtitle");
 }
 
 /**

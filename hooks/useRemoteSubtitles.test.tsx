@@ -3,11 +3,16 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react-native";
 import { AxiosError, type AxiosResponse } from "axios";
 import { createStore, Provider as JotaiProvider } from "jotai";
+import {
+  SERVER_SUBTITLE_POLL_ATTEMPTS,
+  SERVER_SUBTITLE_POLL_INTERVAL_MS,
+} from "@/constants/Subtitles";
 import { CACHE, fakeFiles } from "@/test-utils/fileSystem";
 import { stubReactNative } from "@/test-utils/reactNative";
 import { isExpectedError } from "@/utils/errors";
 import { SubtitleSearchNotAllowedError } from "@/utils/jellyfin/subtitleSearchAccess";
 import {
+  openSubtitlesFileIdOf,
   type SubtitleSearchResult,
   useRemoteSubtitles,
 } from "./useRemoteSubtitles";
@@ -25,20 +30,36 @@ jest.mock("@/providers/JellyfinProvider", () => {
     userAtom: atom(() => mockUser),
   };
 });
+const mockDownloadRemoteSubtitles = jest.fn();
+const mockGetItem = jest.fn();
+
 jest.mock("@jellyfin/sdk/lib/utils/api", () => ({
   getSubtitleApi: () => ({
     searchRemoteSubtitles: mockSearchRemoteSubtitles,
+    downloadRemoteSubtitles: mockDownloadRemoteSubtitles,
   }),
+  getLibraryApi: () => ({ getItem: mockGetItem }),
 }));
 jest.mock("@/utils/atoms/settings", () => ({
   useSettings: () => ({
     settings: { openSubtitlesApiKey: mockOpenSubtitlesApiKey },
   }),
 }));
+const mockChangeDownloadSubtitles = jest.fn();
+const mockAddSubtitleToDownload = jest.fn();
+jest.mock("@/providers/Downloads/subtitles", () => ({
+  changeDownloadSubtitles: (
+    itemId: string,
+    change: (downloaded: object) => unknown,
+  ) => mockChangeDownloadSubtitles(itemId, change),
+  addSubtitleToDownload: (...args: unknown[]) =>
+    mockAddSubtitleToDownload(...args),
+}));
 jest.mock("@/utils/atoms/downloadedSubtitles", () => ({
   addDownloadedSubtitle: jest.fn(),
 }));
 jest.mock("@/utils/opensubtitles/api", () => ({
+  ...jest.requireActual("@/utils/opensubtitles/api"),
   OpenSubtitlesApi: class {
     search = mockOpenSubtitlesSearch;
     download = mockOpenSubtitlesDownload;
@@ -71,7 +92,10 @@ const forbidden = () =>
     { status: 403, headers: {}, data: "", config: {} } as AxiosResponse,
   );
 
-const renderRemoteSubtitles = async (itemId = "item-1") => {
+const renderRemoteSubtitles = async (
+  itemId = "item-1",
+  { intoDownload = false }: { intoDownload?: boolean } = {},
+) => {
   // No garbage collection timer nor retry: either keeps Jest from exiting.
   const client = new QueryClient({
     defaultOptions: {
@@ -82,7 +106,7 @@ const renderRemoteSubtitles = async (itemId = "item-1") => {
   // A store per render: the user atom is read once per store.
   const store = createStore();
   const { result } = await renderHook(
-    () => useRemoteSubtitles({ itemId, item: { Id: itemId } }),
+    () => useRemoteSubtitles({ itemId, item: { Id: itemId }, intoDownload }),
     {
       wrapper: ({ children }: { children: React.ReactNode }) => (
         <QueryClientProvider client={client}>
@@ -155,12 +179,165 @@ describe("useRemoteSubtitles — who may search on the server", () => {
     expect(isExpectedError(failure)).toBe(true);
   });
 
+  // The item page offers only what the server can save: a client-side file
+  // found there would never be played.
+  test("a server-only search does not fall back to the client-side lookup", async () => {
+    mockUser = withPermission;
+    mockOpenSubtitlesApiKey = "key";
+    const result = await renderRemoteSubtitles();
+
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await result.current.searchAsync({
+        language: "eng",
+        serverOnly: true,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(outcome).toEqual([]);
+    expect(mockOpenSubtitlesSearch).not.toHaveBeenCalled();
+  });
+
+  test("a server-only search says why a user who may not gets nothing", async () => {
+    mockUser = withoutPermission;
+    mockOpenSubtitlesApiKey = "key";
+    const result = await renderRemoteSubtitles();
+
+    let failure: unknown;
+    await act(async () => {
+      failure = await result.current
+        .searchAsync({ language: "eng", serverOnly: true })
+        .catch((error: unknown) => error);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(failure).toBeInstanceOf(SubtitleSearchNotAllowedError);
+    expect(mockSearchRemoteSubtitles).not.toHaveBeenCalled();
+    expect(mockOpenSubtitlesSearch).not.toHaveBeenCalled();
+  });
+
   test("any other server failure is passed on as it came", async () => {
     mockUser = withPermission;
     const boom = new Error("boom");
     mockSearchRemoteSubtitles.mockRejectedValue(boom);
 
     expect(await search()).toEqual({ failure: boom });
+  });
+});
+
+describe("useRemoteSubtitles — saving to the server", () => {
+  const found: SubtitleSearchResult = {
+    id: "remote-1",
+    name: "Some Movie",
+    providerName: "Open Subtitles",
+    format: "srt",
+    language: "eng",
+    source: "jellyfin",
+  };
+  const embedded = { Index: 0, Type: "Subtitle" as const, Language: "eng" };
+  const saved = {
+    Index: 0,
+    Type: "Subtitle" as const,
+    Language: "eng",
+    IsExternal: true,
+    Path: "/movies/movie.en.srt",
+  };
+  const lists = (...streams: object[]) => ({
+    data: { MediaSources: [{ Id: "source-1", MediaStreams: streams }] },
+  });
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockUser = withPermission;
+    mockDownloadRemoteSubtitles.mockReset().mockResolvedValue({});
+    mockGetItem.mockReset();
+  });
+  afterEach(() => jest.useRealTimers());
+
+  // The player and the TV modal select what comes back, so it is the saved
+  // file in the server's new numbering.
+  test("returns the subtitle the server lists once it saved it", async () => {
+    mockGetItem
+      .mockResolvedValueOnce(lists(embedded))
+      .mockResolvedValue(lists(saved, { ...embedded, Index: 1 }));
+    const result = await renderRemoteSubtitles();
+
+    let outcome: unknown;
+    await act(async () => {
+      const pending = result.current.downloadAsync(found, "source-1");
+      await jest.advanceTimersByTimeAsync(SERVER_SUBTITLE_POLL_INTERVAL_MS);
+      outcome = await pending;
+    });
+
+    expect(mockDownloadRemoteSubtitles).toHaveBeenCalledWith({
+      itemId: "item-1",
+      subtitleId: "remote-1",
+    });
+    expect(outcome).toEqual({ type: "server", stream: saved });
+  });
+
+  // The server answers a download that failed, at OpenSubtitles' daily limit say, as a saved one.
+  describe("a subtitle the server never lists, for a downloaded item", () => {
+    const fromPlugin = { ...found, id: "e02a34f5_srt-fre-1189827" };
+    const save = async () => {
+      mockGetItem.mockResolvedValue(lists(embedded));
+      const result = await renderRemoteSubtitles("item-1", {
+        intoDownload: true,
+      });
+      let outcome: unknown;
+      await act(async () => {
+        const pending = result.current.downloadAsync(fromPlugin, "source-1");
+        await jest.advanceTimersByTimeAsync(
+          SERVER_SUBTITLE_POLL_INTERVAL_MS * SERVER_SUBTITLE_POLL_ATTEMPTS,
+        );
+        outcome = await pending;
+      });
+      return outcome;
+    };
+
+    beforeEach(() => {
+      mockOpenSubtitlesDownload
+        .mockReset()
+        .mockResolvedValue({ link: "https://dl.opensubtitles.example/file" });
+      mockChangeDownloadSubtitles.mockReset().mockResolvedValue(true);
+    });
+    afterEach(() => {
+      mockOpenSubtitlesApiKey = undefined;
+    });
+
+    test("comes from OpenSubtitles into the download instead", async () => {
+      mockOpenSubtitlesApiKey = "key";
+
+      expect(await save()).toEqual({ type: "download" });
+      expect(mockOpenSubtitlesDownload).toHaveBeenCalledWith(1189827);
+    });
+
+    test("is left to the server without an OpenSubtitles key", async () => {
+      expect(await save()).toEqual({ type: "server", stream: undefined });
+      expect(mockOpenSubtitlesDownload).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("openSubtitlesFileIdOf", () => {
+  const result = (id: string, providerName = "Open Subtitles") =>
+    ({ id, providerName }) as SubtitleSearchResult;
+
+  test("reads the file the server's OpenSubtitles plugin found", () => {
+    expect(openSubtitlesFileIdOf(result("e02a34f5_srt-fre-1189827"))).toBe(
+      1189827,
+    );
+    expect(
+      openSubtitlesFileIdOf(result("e02a34f5_srt-eng-42-sdh-forced")),
+    ).toBe(42);
+  });
+
+  test("has none for another provider's result", () => {
+    expect(
+      openSubtitlesFileIdOf(result("e02a34f5_srt-fre-1189827", "Podnapisi")),
+    ).toBeUndefined();
+    expect(openSubtitlesFileIdOf(result("e02a34f5_12345"))).toBeUndefined();
   });
 });
 
@@ -233,6 +410,60 @@ describe("useRemoteSubtitles — where an OpenSubtitles download is written", ()
     ]);
     expect(await download("movie.srt", "0a1b2c3d-4e5f")).toContain(
       `${SUBTITLES}/0a1b2c3d-4e5f_movie.srt`,
+    );
+  });
+});
+
+// A file kept in the cache is lost to a download: offline, only the download's own files play.
+describe("useRemoteSubtitles — an OpenSubtitles file for a downloaded item", () => {
+  const found: SubtitleSearchResult = {
+    id: "result-1",
+    name: "Show.S01E01.NL",
+    providerName: "OpenSubtitles",
+    format: "srt",
+    language: "nl",
+    fileId: 7,
+    source: "opensubtitles",
+  };
+
+  beforeEach(() => {
+    stubReactNative({ isTV: false });
+    mockOpenSubtitlesApiKey = "key";
+    mockOpenSubtitlesDownload
+      .mockReset()
+      .mockResolvedValue({ link: "https://dl.opensubtitles.example/file" });
+    mockChangeDownloadSubtitles
+      .mockReset()
+      .mockImplementation(async (_id, change) => {
+        await change({ item: { Id: "item-1" } });
+        return true;
+      });
+    mockAddSubtitleToDownload.mockReset().mockResolvedValue({});
+    fakeFiles.clear();
+  });
+
+  test("goes into the download as a local file, not into the cache", async () => {
+    const result = await renderRemoteSubtitles("item-1", {
+      intoDownload: true,
+    });
+
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await result.current.downloadAsync(found);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(outcome).toEqual({ type: "download" });
+    expect(fakeFiles.downloads()).toEqual([]);
+    expect(mockAddSubtitleToDownload).toHaveBeenCalledWith(
+      { item: { Id: "item-1" } },
+      expect.objectContaining({
+        Codec: "srt",
+        Language: "dut",
+        DisplayTitle: "Dutch - OpenSubtitles",
+      }),
+      { url: "https://dl.opensubtitles.example/file" },
+      { local: true },
     );
   });
 });

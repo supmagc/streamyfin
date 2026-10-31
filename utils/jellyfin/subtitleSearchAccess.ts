@@ -20,6 +20,15 @@ export const canSearchServerSubtitles = (
 };
 
 /**
+ * Whether Jellyfin lets this user delete a subtitle file from the server: that
+ * route needs an administrator, not the subtitle management permission. Unlike
+ * the search, a user whose policy has not loaded is not offered it.
+ */
+export const canDeleteServerSubtitles = (
+  user: UserDto | null | undefined,
+): boolean => user?.Policy?.IsAdministrator === true;
+
+/**
  * The server would refuse, or did refuse, a subtitle search for this user.
  * Its own class so the screens can say so in the user's language instead of
  * guessing at a missing provider.

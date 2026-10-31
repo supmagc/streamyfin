@@ -1,10 +1,17 @@
 import type {
   BaseItemDto,
   MediaSourceInfo,
+  MediaStream,
 } from "@jellyfin/sdk/lib/generated-client/models";
 import { useNavigation } from "expo-router";
 import { useAtom } from "jotai";
-import React, { useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { Platform, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -23,11 +30,13 @@ import { ParallaxScrollView } from "@/components/ParallaxPage";
 import { PlayButton } from "@/components/PlayButton";
 import { PlayedStatus } from "@/components/PlayedStatus";
 import { SimilarItems } from "@/components/SimilarItems";
+import { SubtitleSearchSheet } from "@/components/SubtitleSearchSheet";
 import { CurrentSeries } from "@/components/series/CurrentSeries";
 import { SeasonEpisodesCarousel } from "@/components/series/SeasonEpisodesCarousel";
 import { SyncPlayButton } from "@/components/syncplay/SyncPlayButton";
 import { SyncPlayQueueButton } from "@/components/syncplay/SyncPlayQueueButton";
 import { LOGO_HEIGHT } from "@/constants/Images";
+import { SHEET_HANDOFF_DELAY_MS } from "@/constants/Values";
 import useDefaultPlaySettings from "@/hooks/useDefaultPlaySettings";
 import { useImageColorsReturn } from "@/hooks/useImageColorsReturn";
 import { useOrientation } from "@/hooks/useOrientation";
@@ -35,6 +44,7 @@ import { useVersionItemState } from "@/hooks/useVersionItem";
 import * as ScreenOrientation from "@/packages/expo-screen-orientation";
 import { useDownload } from "@/providers/DownloadProvider";
 import { apiAtom, userAtom } from "@/providers/JellyfinProvider";
+import { useNetworkStatus } from "@/providers/NetworkStatusProvider";
 import { useOfflineMode } from "@/providers/OfflineModeProvider";
 import { useSettings } from "@/utils/atoms/settings";
 import { getLogoImageUrlById } from "@/utils/jellyfin/image/getLogoImageUrlById";
@@ -44,6 +54,8 @@ import {
   isPlayableItem,
 } from "@/utils/jellyfin/media/isPlayableItem";
 import { getPlayingRunTimeTicks } from "@/utils/jellyfin/mediaSourceVersion";
+import { canSearchServerSubtitles } from "@/utils/jellyfin/subtitleSearchAccess";
+import { activeOpenSubtitlesApiKey } from "@/utils/opensubtitles/api";
 import { AddToFavorites } from "./AddToFavorites";
 import { AddToWatchlist } from "./AddToWatchlist";
 import { ItemHeader } from "./ItemHeader";
@@ -81,14 +93,25 @@ const ItemContentMobile: React.FC<ItemContentProps> = ({
   const [api] = useAtom(apiAtom);
   const { t } = useTranslation();
   const isOffline = useOfflineMode();
-  const { getDownloadedItemById } = useDownload();
+  const { getDownloadedItemById, syncSubtitles } = useDownload();
   // A download pins the tracks it was pulled with, and only the record knows
   // them: resolving against the server media source hands back an index for a
   // stream the local file may not contain.
-  const downloadedTracks =
-    isOffline && item?.Id
-      ? getDownloadedItemById(item.Id)?.userData
-      : undefined;
+  const offlineDownload =
+    isOffline && item?.Id ? getDownloadedItemById(item.Id) : undefined;
+  const downloadedTracks = offlineDownload?.userData;
+  // Offline the media options list the file's own tracks.
+  const offlineSource = offlineDownload?.mediaSource;
+  const offlineItem = useMemo(
+    () =>
+      item && offlineSource ? { ...item, MediaSources: [offlineSource] } : null,
+    [item, offlineSource],
+  );
+  const isTranscodedDownload = offlineDownload?.userData?.isTranscoded === true;
+  const offlineOptions = useMemo(
+    () => (offlineSource ? { isTranscoded: isTranscodedDownload } : undefined),
+    [offlineSource, isTranscodedDownload],
+  );
   const { settings } = useSettings();
   const { orientation } = useOrientation();
   const navigation = useNavigation();
@@ -155,13 +178,44 @@ const ItemContentMobile: React.FC<ItemContentProps> = ({
     return Boolean(logoUrl && loadingLogo);
   }, [loadingLogo, logoUrl]);
 
+  const { isConnected, serverConnected } = useNetworkStatus();
+  // Streamed, only the server can save a subtitle for later. A download also
+  // takes one from OpenSubtitles; either way it needs the network.
+  const canSearchSubtitles = isDownloaded
+    ? isConnected &&
+      (canSearchServerSubtitles(user) || !!activeOpenSubtitlesApiKey(settings))
+    : !isOffline && canSearchServerSubtitles(user);
+  // A download picks up the subtitle files the server gained or lost since.
+  useEffect(() => {
+    if (isDownloaded && item?.Id && serverConnected) {
+      void syncSubtitles([item.Id]);
+    }
+  }, [isDownloaded, item?.Id, serverConnected, syncSubtitles]);
+
+  const [subtitleSearchOpen, setSubtitleSearchOpen] = useState(false);
+  // A subtitle just saved to the server, in the numbering the item reloads
+  // with: saving one renumbers every track, so it is only applied with the
+  // reloaded defaults below.
+  const savedSubtitleIndex = useRef<number | undefined>(undefined);
+  const openSubtitleSearch = useCallback(() => {
+    setTimeout(() => setSubtitleSearchOpen(true), SHEET_HANDOFF_DELAY_MS);
+  }, []);
+  const handleSubtitleSaved = useCallback((stream: MediaStream) => {
+    savedSubtitleIndex.current = stream.Index ?? undefined;
+  }, []);
+
   // Needs to automatically change the selected to the default values for default indexes.
   useEffect(() => {
+    const saved = savedSubtitleIndex.current;
+    savedSubtitleIndex.current = undefined;
     setSelectedOptions(() => ({
       bitrate: defaultBitrate,
-      mediaSource: defaultMediaSource ?? undefined,
+      mediaSource: offlineSource ?? defaultMediaSource ?? undefined,
       subtitleIndex:
-        downloadedTracks?.subtitleStreamIndex ?? defaultSubtitleIndex ?? -1,
+        saved ??
+        downloadedTracks?.subtitleStreamIndex ??
+        defaultSubtitleIndex ??
+        -1,
       audioIndex: downloadedTracks?.audioStreamIndex ?? defaultAudioIndex,
     }));
   }, [
@@ -170,6 +224,7 @@ const ItemContentMobile: React.FC<ItemContentProps> = ({
     defaultSubtitleIndex,
     defaultMediaSource,
     downloadedTracks,
+    offlineSource,
   ]);
 
   useEffect(() => {
@@ -313,12 +368,16 @@ const ItemContentMobile: React.FC<ItemContentProps> = ({
                   // there always.
                   trailingGap={12}
                 />
-                {!isOffline && (
+                {(!isOffline || offlineItem) && (
                   <MediaSourceButton
                     selectedOptions={selectedOptions}
                     setSelectedOptions={setSelectedOptions}
-                    item={itemWithSources}
+                    item={isOffline ? offlineItem : itemWithSources}
                     colors={itemColors}
+                    onSearchSubtitles={
+                      canSearchSubtitles ? openSubtitleSearch : undefined
+                    }
+                    download={offlineOptions}
                   />
                 )}
               </View>
@@ -357,6 +416,16 @@ const ItemContentMobile: React.FC<ItemContentProps> = ({
           )}
         </View>
       </ParallaxScrollView>
+      {canSearchSubtitles && (
+        <SubtitleSearchSheet
+          open={subtitleSearchOpen}
+          setOpen={setSubtitleSearchOpen}
+          item={item}
+          mediaSourceId={selectedOptions?.mediaSource?.Id}
+          // In the server's numbering, which a download's file does not have.
+          onSaved={isOffline ? undefined : handleSubtitleSaved}
+        />
+      )}
     </View>
   );
 };

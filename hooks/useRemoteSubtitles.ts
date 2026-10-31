@@ -1,5 +1,6 @@
 import type {
   BaseItemDto,
+  MediaStream,
   RemoteSubtitleInfo,
 } from "@jellyfin/sdk/lib/generated-client";
 import { getSubtitleApi } from "@jellyfin/sdk/lib/utils/api";
@@ -9,6 +10,10 @@ import { Directory, File, Paths } from "expo-file-system";
 import { useAtomValue } from "jotai";
 import { useCallback, useMemo } from "react";
 import { Platform } from "react-native";
+import {
+  addSubtitleToDownload,
+  changeDownloadSubtitles,
+} from "@/providers/Downloads/subtitles";
 import { isPlainFileName, safeNamePart } from "@/providers/Downloads/utils";
 import { apiAtom, userAtom } from "@/providers/JellyfinProvider";
 import {
@@ -18,12 +23,19 @@ import {
 import { useSettings } from "@/utils/atoms/settings";
 import { markExpectedError } from "@/utils/errors";
 import {
+  fetchServerStreams,
+  waitForAddedServerSubtitle,
+} from "@/utils/jellyfin/serverSubtitles";
+import {
   canSearchServerSubtitles,
   SubtitleSearchNotAllowedError,
 } from "@/utils/jellyfin/subtitleSearchAccess";
 import {
+  activeOpenSubtitlesApiKey,
+  COMMON_SUBTITLE_LANGUAGES,
   OpenSubtitlesApi,
   type OpenSubtitlesResult,
+  toIso6392B,
 } from "@/utils/opensubtitles/api";
 
 export interface SubtitleSearchResult {
@@ -48,6 +60,23 @@ interface UseRemoteSubtitlesOptions {
   itemId: string;
   item: BaseItemDto;
   mediaSourceId?: string | null;
+  /** An OpenSubtitles file goes into the item's download, instead of the cache. */
+  intoDownload?: boolean;
+}
+
+/**
+ * The OpenSubtitles file a server search result is, when the server's OpenSubtitles plugin found
+ * it: the plugin's ids are `srt-{language}-{fileId}[-sdh][-forced]`, after the server's own
+ * provider prefix and an underscore.
+ */
+export function openSubtitlesFileIdOf(
+  result: SubtitleSearchResult,
+): number | undefined {
+  if (!/open\s*subtitles/i.test(result.providerName)) return undefined;
+  const match = /(?:^|_)[a-z]+-[a-z]+-(\d+)(?:-sdh)?(?:-forced)?$/i.exec(
+    result.id,
+  );
+  return match ? Number(match[1]) : undefined;
 }
 
 /**
@@ -106,16 +135,13 @@ function openSubtitlesToResult(
 export function useRemoteSubtitles({
   itemId,
   item,
-  mediaSourceId: _mediaSourceId,
+  mediaSourceId: hookMediaSourceId,
+  intoDownload = false,
 }: UseRemoteSubtitlesOptions) {
   const api = useAtomValue(apiAtom);
   const user = useAtomValue(userAtom);
   const { settings } = useSettings();
-  // Turning the lookup off keeps a stored key but stops direct client lookups.
-  const openSubtitlesApiKey =
-    settings.openSubtitlesEnabled === false
-      ? undefined
-      : settings.openSubtitlesApiKey?.trim();
+  const openSubtitlesApiKey = activeOpenSubtitlesApiKey(settings);
 
   // Check if we can use OpenSubtitles fallback
   const hasOpenSubtitlesApiKey = Boolean(openSubtitlesApiKey);
@@ -185,19 +211,32 @@ export function useRemoteSubtitles({
   );
 
   /**
-   * Download subtitle via Jellyfin API (saves to server library)
+   * Download subtitle via Jellyfin API (saves to server library), and return the subtitle stream
+   * it became once the server lists it: undefined when that took too long.
    */
   const downloadJellyfin = useCallback(
-    async (subtitleId: string): Promise<void> => {
+    async (
+      result: SubtitleSearchResult,
+      mediaSourceId?: string | null,
+    ): Promise<MediaStream | undefined> => {
       if (!api) throw new Error("API not available");
 
-      const subtitleApi = getSubtitleApi(api);
-      await subtitleApi.downloadRemoteSubtitles({
+      const target = { itemId, userId: user?.Id, mediaSourceId };
+      // The server renumbers every track when it adds one, so the new one is
+      // told apart from what it listed before.
+      const before = await fetchServerStreams(api, target);
+      await getSubtitleApi(api).downloadRemoteSubtitles({
         itemId,
-        subtitleId,
+        subtitleId: result.id,
+      });
+      if (!before) return undefined;
+      return waitForAddedServerSubtitle(api, {
+        ...target,
+        before,
+        language: result.language,
       });
     },
-    [api, itemId],
+    [api, itemId, user?.Id],
   );
 
   /**
@@ -274,16 +313,66 @@ export function useRemoteSubtitles({
   );
 
   /**
+   * Download subtitle via OpenSubtitles API into the item's download, after its other tracks
+   */
+  const downloadOpenSubtitlesIntoDownload = useCallback(
+    async (fileId: number, result: SubtitleSearchResult): Promise<void> => {
+      if (!openSubtitlesApi) {
+        throw new Error("OpenSubtitles API key not configured");
+      }
+      const { link } = await openSubtitlesApi.download(fileId);
+      const language = toIso6392B(result.language);
+      const languageName =
+        COMMON_SUBTITLE_LANGUAGES.find((l) => l.code === language)?.name ??
+        language.toUpperCase();
+      const added = await changeDownloadSubtitles(itemId, (downloaded) =>
+        addSubtitleToDownload(
+          downloaded,
+          {
+            Codec: result.format,
+            Language: language,
+            Title: result.name,
+            DisplayTitle: `${languageName} - ${result.providerName}`,
+            IsHearingImpaired: result.hearingImpaired,
+            IsTextSubtitleStream: true,
+          },
+          { url: link },
+          { local: true },
+        ),
+      );
+      if (!added) throw new Error("The subtitle could not be added");
+    },
+    [openSubtitlesApi, itemId],
+  );
+
+  /**
    * Search mutation - tries Jellyfin first, falls back to OpenSubtitles
    */
   const searchMutation = useMutation({
     mutationFn: async ({
       language,
       preferOpenSubtitles = false,
+      serverOnly = false,
     }: {
       language: string;
       preferOpenSubtitles?: boolean;
+      /** Only results the server can save: outside a playback a file kept on the device is lost. */
+      serverOnly?: boolean;
     }) => {
+      if (serverOnly) {
+        if (!canSearchServerSubtitles(user)) {
+          throw markExpectedError(new SubtitleSearchNotAllowedError());
+        }
+        try {
+          return await searchJellyfin(language);
+        } catch (error) {
+          if (isAxiosError(error) && error.response?.status === 403) {
+            throw markExpectedError(new SubtitleSearchNotAllowedError());
+          }
+          throw error;
+        }
+      }
+
       // If user prefers OpenSubtitles and has API key, use it
       if (preferOpenSubtitles && hasOpenSubtitlesApiKey) {
         return searchOpenSubtitles(language);
@@ -324,10 +413,27 @@ export function useRemoteSubtitles({
    * Download mutation
    */
   const downloadMutation = useMutation({
-    mutationFn: async (result: SubtitleSearchResult) => {
+    mutationFn: async ({
+      result,
+      mediaSourceId,
+    }: {
+      result: SubtitleSearchResult;
+      mediaSourceId?: string | null;
+    }) => {
       if (result.source === "jellyfin") {
-        await downloadJellyfin(result.id);
-        return { type: "server" as const };
+        const stream = await downloadJellyfin(result, mediaSourceId);
+        // The server answers a download that failed as a saved one, so one it never lists has
+        // most likely failed. A download can take the same file from OpenSubtitles itself.
+        const fileId = openSubtitlesFileIdOf(result);
+        if (!stream && intoDownload && openSubtitlesApi && fileId) {
+          await downloadOpenSubtitlesIntoDownload(fileId, result);
+          return { type: "download" as const };
+        }
+        return { type: "server" as const, stream };
+      }
+      if (result.fileId && intoDownload) {
+        await downloadOpenSubtitlesIntoDownload(result.fileId, result);
+        return { type: "download" as const };
       }
       if (result.fileId) {
         const { path, subtitle } = await downloadOpenSubtitles(
@@ -352,8 +458,11 @@ export function useRemoteSubtitles({
     // Actions
     search: searchMutation.mutate,
     searchAsync: searchMutation.mutateAsync,
-    download: downloadMutation.mutate,
-    downloadAsync: downloadMutation.mutateAsync,
+    /** The media source is the one playing, when it is not the one the hook was given. */
+    downloadAsync: (
+      result: SubtitleSearchResult,
+      mediaSourceId: string | null | undefined = hookMediaSourceId,
+    ) => downloadMutation.mutateAsync({ result, mediaSourceId }),
     reset: () => {
       searchMutation.reset();
       downloadMutation.reset();

@@ -2,6 +2,7 @@ import type { Api } from "@jellyfin/sdk";
 import type { BaseItemDto } from "@jellyfin/sdk/lib/generated-client";
 import i18next from "i18next";
 import type { NativePlayerStrings } from "@/modules/mpv-player";
+import type { DownloadedItem } from "@/providers/Downloads/types";
 import { setJellyfinHeaders } from "@/test-utils/customHeaders";
 import type { Settings } from "@/utils/atoms/settings";
 import { getStreamUrl } from "@/utils/jellyfin/media/getStreamUrl";
@@ -133,6 +134,51 @@ describe("the native player's stream headers", () => {
         remote: true,
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("the native player's subtitle search", () => {
+  const searchOffered = async (offline: boolean, networkConnected: boolean) => {
+    jest.mocked(getStreamUrl).mockResolvedValue({
+      url: `${SERVER}/Videos/1/stream.mkv`,
+      sessionId: "session-1",
+      mediaSource: { Id: "source-1", MediaStreams: [] },
+    } as Awaited<ReturnType<typeof getStreamUrl>>);
+
+    const built = await buildNativePlayerConfig({
+      api,
+      userId: "user-1",
+      settings: {
+        playbackSpeedPerShow: {},
+        playbackSpeedPerMedia: {},
+      } as Settings,
+      req: { itemId: "item-1", offline },
+      getDownloadedItemById: () =>
+        ({
+          item,
+          mediaSource: { Id: "source-1", MediaStreams: [] },
+          videoFilePath: "file:///documents/movie.mkv",
+          userData: {},
+        }) as unknown as DownloadedItem,
+      networkConnected,
+      strings: {} as NativePlayerStrings,
+      originalLabel: "Original",
+      item,
+    });
+    return built?.config.ui?.subtitleSearchEnabled;
+  };
+
+  test("is offered while streaming", async () => {
+    expect(await searchOffered(false, true)).toBe(true);
+  });
+
+  // What it finds goes into the download.
+  test("is offered while a download plays and the network is there", async () => {
+    expect(await searchOffered(true, true)).toBe(true);
+  });
+
+  test("is hidden while a download plays without a network", async () => {
+    expect(await searchOffered(true, false)).toBe(false);
   });
 });
 

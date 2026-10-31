@@ -237,12 +237,15 @@ export const PlayButton: React.FC<Props> = ({
         ? getDownloadedItemById(item.Id)
         : undefined;
 
-      // If already in offline mode, play downloaded file directly
+      // If already in offline mode, play downloaded file directly, on the
+      // tracks the page's options picked from the file's own.
       if (isOffline && downloadedItem) {
         await playMedia(
           {
             itemId: item.Id!,
             offline: true,
+            audioIndex: selectedOptions.audioIndex,
+            subtitleIndex: selectedOptions.subtitleIndex,
             playbackPositionTicks: positionTicks,
           },
           { item },
@@ -343,7 +346,17 @@ export const PlayButton: React.FC<Props> = ({
       // If not downloaded, proceed with normal flow
       handleNormalPlayFlow(positionTicks);
     },
-    [item, isOffline, handleNormalPlayFlow, playMedia, t, showModal, hideModal],
+    [
+      item,
+      isOffline,
+      selectedOptions.audioIndex,
+      selectedOptions.subtitleIndex,
+      handleNormalPlayFlow,
+      playMedia,
+      t,
+      showModal,
+      hideModal,
+    ],
   );
 
   const onPress = useCallback(() => {

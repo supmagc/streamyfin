@@ -37,6 +37,7 @@ cadence meant knowing both existed, and nothing would have failed if only one ha
 | `constants/TVPosterSizes.ts` | TV poster size keys |
 | `constants/Playback.ts` | Playback policy shared by the JS and native players (progress report cadence, next-episode countdown window, play queue size cap), how long a remote repeat or shuffle change waits to be confirmed, how often the stats overlay polls the transcode progress, how long a new native player waits for a closing one, and the audio transcoding choices and their labels |
 | `constants/Downloads.ts` | Downloads: size estimate factors, the names of files written next to a video, and the original or transcode modes and video codecs a download offers |
+| `constants/Subtitles.ts` | Subtitles saved to the server: how often and how many times the app looks for one to show up |
 | `constants/Logs.ts` | App log storage key and how many entries it keeps |
 | `constants/Privacy.ts` | What stands in for a secret in anything the app writes out (log, Sentry) |
 | `constants/Music.ts` | Music player policy: the volume normalization modes, their default, and the gain ceiling; the storage key of the stored tracks index |

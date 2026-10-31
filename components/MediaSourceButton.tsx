@@ -14,7 +14,11 @@ import { SUBTITLES_OFF } from "@/utils/subtitles/subtitleIndex";
 import { buildAudioMenu, buildSubtitleMenu } from "@/utils/subtitles/trackMenu";
 import { BITRATES } from "./BitrateSelector";
 import type { SelectedOptions } from "./ItemContent";
-import { type OptionGroup, PlatformDropdown } from "./PlatformDropdown";
+import {
+  type Option,
+  type OptionGroup,
+  PlatformDropdown,
+} from "./PlatformDropdown";
 
 interface Props extends React.ComponentProps<typeof TouchableOpacity> {
   item?: BaseItemDto | null;
@@ -23,6 +27,8 @@ interface Props extends React.ComponentProps<typeof TouchableOpacity> {
     React.SetStateAction<SelectedOptions | undefined>
   >;
   colors?: ThemeColors;
+  onSearchSubtitles?: () => void;
+  download?: { isTranscoded: boolean };
 }
 
 export const MediaSourceButton: React.FC<Props> = ({
@@ -30,6 +36,8 @@ export const MediaSourceButton: React.FC<Props> = ({
   selectedOptions,
   setSelectedOptions,
   colors,
+  onSearchSubtitles,
+  download,
 }: Props) => {
   const { t } = useTranslation();
   const { settings } = useSettings();
@@ -69,10 +77,17 @@ export const MediaSourceButton: React.FC<Props> = ({
       buildAudioMenu(selectedOptions.mediaSource?.MediaStreams, {
         selectedIndex: selectedOptions.audioIndex,
         isTranscoding: Boolean(selectedOptions.mediaSource?.TranscodingUrl),
+        offlineTranscoded: download?.isTranscoded,
         formatLabel: trackLabel,
         originalLabel: t("common.original_audio"),
       }),
-    [selectedOptions.mediaSource, selectedOptions.audioIndex, trackLabel, t],
+    [
+      selectedOptions.mediaSource,
+      selectedOptions.audioIndex,
+      download?.isTranscoded,
+      trackLabel,
+      t,
+    ],
   );
 
   const subtitleRows = useMemo(
@@ -90,17 +105,19 @@ export const MediaSourceButton: React.FC<Props> = ({
     const groups: OptionGroup[] = [];
 
     // Bitrate group
-    groups.push({
-      title: t("item_card.quality"),
-      options: BITRATES.map((bitrate) => ({
-        type: "radio" as const,
-        label: bitrate.key,
-        value: bitrate,
-        selected: bitrate.value === selectedOptions.bitrate?.value,
-        onPress: () =>
-          setSelectedOptions((prev) => prev && { ...prev, bitrate }),
-      })),
-    });
+    if (!download) {
+      groups.push({
+        title: t("item_card.quality"),
+        options: BITRATES.map((bitrate) => ({
+          type: "radio" as const,
+          label: bitrate.key,
+          value: bitrate,
+          selected: bitrate.value === selectedOptions.bitrate?.value,
+          onPress: () =>
+            setSelectedOptions((prev) => prev && { ...prev, bitrate }),
+        })),
+      });
+    }
 
     // Media Source group (only if multiple sources)
     if (item?.MediaSources && item.MediaSources.length > 1) {
@@ -145,28 +162,40 @@ export const MediaSourceButton: React.FC<Props> = ({
       });
     }
 
-    if (subtitleRows.some((r) => r.kind === "server")) {
-      const [noneOption, ...subtitleOptions] = subtitleRows.map((row) => ({
-        type: "radio" as const,
-        label: row.label,
-        value: row.index,
-        selected: row.selected,
-        onPress: () => {
-          setSelectedOptions(
-            (prev) => prev && { ...prev, subtitleIndex: row.index },
-          );
-          rememberSeriesTrackFromRow({
-            item,
-            kind: "subtitle",
-            row,
-            settings,
-          });
-        },
-      }));
+    // An item without subtitles still gets the group when they can be
+    // searched for: that is when they are wanted most.
+    const hasSubtitles = subtitleRows.some((r) => r.kind === "server");
+    if (hasSubtitles || onSearchSubtitles) {
+      const options: Option[] = hasSubtitles
+        ? subtitleRows.map((row) => ({
+            type: "radio" as const,
+            label: row.label,
+            value: row.index,
+            selected: row.selected,
+            onPress: () => {
+              setSelectedOptions(
+                (prev) => prev && { ...prev, subtitleIndex: row.index },
+              );
+              rememberSeriesTrackFromRow({
+                item,
+                kind: "subtitle",
+                row,
+                settings,
+              });
+            },
+          }))
+        : [];
+      if (onSearchSubtitles) {
+        options.push({
+          type: "action",
+          label: t("player.search_subtitles"),
+          onPress: onSearchSubtitles,
+        });
+      }
 
       groups.push({
         title: t("item_card.subtitles.label"),
-        options: [noneOption, ...subtitleOptions],
+        options,
       });
     }
 
@@ -180,6 +209,8 @@ export const MediaSourceButton: React.FC<Props> = ({
     t,
     setSelectedOptions,
     settings,
+    onSearchSubtitles,
+    download,
   ]);
 
   const trigger = (

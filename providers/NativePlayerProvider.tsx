@@ -1,4 +1,7 @@
-import type { BaseItemDto } from "@jellyfin/sdk/lib/generated-client";
+import type {
+  BaseItemDto,
+  MediaStream,
+} from "@jellyfin/sdk/lib/generated-client";
 import {
   PlaybackOrder,
   type PlaybackProgressInfo,
@@ -82,6 +85,7 @@ import {
 // module is absent from TV binaries and a top-level import crashes on launch.
 import { OrientationLock } from "@/packages/expo-screen-orientation";
 import { useDownload } from "@/providers/DownloadProvider";
+import { subtitlesAddedSince } from "@/providers/Downloads/subtitles";
 import type { MediaTimeSegment } from "@/providers/Downloads/types";
 import { apiAtom, userAtom } from "@/providers/JellyfinProvider";
 import { useSyncPlay } from "@/providers/SyncPlayProvider";
@@ -458,6 +462,7 @@ const NativePlayerProviderInner: React.FC<{
   // Play mid-swap, fast taps) can interleave — only the newest may commit.
   const playRequestTokenRef = useRef(0);
   const [activeItem, setActiveItem] = useState<BaseItemDto | null>(null);
+  const [activeOffline, setActiveOffline] = useState(false);
   const [isActive, setIsActive] = useState(false);
   const nativePipRef = useRef(false);
   // How the last session's player closed, for a request that was meant to
@@ -605,6 +610,7 @@ const NativePlayerProviderInner: React.FC<{
   const pluginSettingsRef = useRef(pluginSettings);
   const userRef = useRef(user);
   const isConnectedRef = useRef(isConnected);
+  const downloadUtilsRef = useRef(downloadUtils);
   useEffect(() => {
     serverVersionRef.current = serverVersion;
     apiRef.current = api;
@@ -612,14 +618,17 @@ const NativePlayerProviderInner: React.FC<{
     pluginSettingsRef.current = pluginSettings;
     userRef.current = user;
     isConnectedRef.current = isConnected;
+    downloadUtilsRef.current = downloadUtils;
   });
 
   // Remote subtitle search/download for the native search sheet (Jellyfin
   // server plugin first, client-side OpenSubtitles fallback when an API key
-  // is configured — same backend logic as the TV subtitle modal).
+  // is configured — same backend logic as the TV subtitle modal). A download
+  // playing keeps what is found in its own files.
   const remoteSubtitles = useRemoteSubtitles({
     itemId: activeItem?.Id ?? "",
     item: activeItem ?? ({} as BaseItemDto),
+    intoDownload: activeOffline,
   });
   const remoteSubtitlesRef = useRef(remoteSubtitles);
   useEffect(() => {
@@ -992,6 +1001,7 @@ const NativePlayerProviderInner: React.FC<{
         strings: buildNativePlayerStrings(t),
         originalLabel: t("common.original_audio"),
         item: options.item,
+        networkConnected: isConnectedRef.current === true,
       }).catch((error) => {
         logAndCaptureError("NativePlayer config build failed", error, {
           offline: req.offline,
@@ -1233,6 +1243,7 @@ const NativePlayerProviderInner: React.FC<{
       if (sessionRef.current !== session) return true;
       session.committed = true;
       setActiveItem(session.item);
+      setActiveOffline(session.offline);
       setIsActive(true);
       // Empty the legacy single-slot state before playback starts: it is
       // still read by hooks/useWebsockets, and a stale coalesced "Stop" or
@@ -1715,45 +1726,6 @@ const NativePlayerProviderInner: React.FC<{
     [t],
   );
 
-  /**
-   * A server-side download saves the file next to the media and refreshes the
-   * item asynchronously — poll until a subtitle stream that wasn't in the
-   * pre-download set appears, so the stream reload can select it.
-   */
-  const waitForNewServerSubtitle = useCallback(
-    async (
-      session: NativeSession,
-      result: SubtitleSearchResult,
-    ): Promise<number | undefined> => {
-      const before = new Set(
-        session.stream.mediaSource.MediaStreams?.filter(
-          (s) => s.Type === "Subtitle",
-        ).map((s) => s.Index),
-      );
-      for (let attempt = 0; attempt < 8; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        if (sessionRef.current !== session || !apiRef.current) return undefined;
-        const res = await getLibraryApi(apiRef.current)
-          .getItem({ itemId: session.item.Id!, userId: userRef.current?.Id })
-          .catch(() => null);
-        const source =
-          res?.data?.MediaSources?.find(
-            (s) => s.Id === session.mediaSourceId,
-          ) ?? res?.data?.MediaSources?.[0];
-        const fresh = source?.MediaStreams?.filter(
-          (s) => s.Type === "Subtitle" && !before.has(s.Index),
-        );
-        if (fresh?.length) {
-          const match =
-            fresh.find((s) => s.Language === result.language) ?? fresh[0];
-          return match.Index ?? undefined;
-        }
-      }
-      return undefined;
-    },
-    [],
-  );
-
   /** Push a download failure as an inline banner over the intact result list. */
   const pushDownloadFailure = useCallback(
     (session: NativeSession, message: string) => {
@@ -1766,6 +1738,41 @@ const NativePlayerProviderInner: React.FC<{
     [],
   );
 
+  /**
+   * Attaches the subtitle files a download gained while it plays, and selects the one just saved.
+   * False when it has none, or the player did not take it.
+   */
+  const attachDownloadSubtitles = useCallback(
+    async (session: NativeSession, saved?: MediaStream) => {
+      const itemId = session.item.Id;
+      const record = itemId
+        ? downloadUtilsRef.current.getDownloadedItemById(itemId)
+        : undefined;
+      if (!record) return false;
+      const { added, selected } = subtitlesAddedSince(
+        session.stream.mediaSource.MediaStreams,
+        record,
+        saved,
+      );
+      if (selected?.Index == null) return false;
+      for (const stream of added) {
+        const url = getExternalSubtitleUrl(stream, { offline: true });
+        if (url) await nativePlayerAddExternalSubtitle(url);
+      }
+      if (sessionRef.current !== session) return false;
+      session.stream = { ...session.stream, mediaSource: record.mediaSource };
+      session.downloadedItem = record;
+      const selection = await applySubtitleSelection(session, selected.Index);
+      if (sessionRef.current !== session || selection.kind !== "select") {
+        return false;
+      }
+      session.currentSubtitleIndex = selected.Index;
+      pushTrackMenus(session);
+      return true;
+    },
+    [applySubtitleSelection, pushTrackMenus],
+  );
+
   const handleSubtitleDownload = useCallback(
     async (session: NativeSession, resultId: string) => {
       const result = session.subtitleSearchResults?.find(
@@ -1776,16 +1783,51 @@ const NativePlayerProviderInner: React.FC<{
         return;
       }
       try {
-        const downloaded =
-          await remoteSubtitlesRef.current.downloadAsync(result);
+        const downloaded = await remoteSubtitlesRef.current.downloadAsync(
+          result,
+          session.mediaSourceId,
+        );
         if (sessionRef.current !== session) return;
+        // A download plays from its own files: what was saved goes into them,
+        // and from there into the running player.
+        if (session.offline) {
+          const saved =
+            downloaded.type === "server" ? downloaded.stream : undefined;
+          if (
+            downloaded.type === "server" &&
+            session.item.Id &&
+            !(await downloadUtilsRef.current.takeServerSubtitle(
+              session.item.Id,
+              saved,
+            ))
+          ) {
+            if (sessionRef.current === session) {
+              pushDownloadFailure(
+                session,
+                t("player.subtitle_saved_pending_download"),
+              );
+            }
+            return;
+          }
+          if (sessionRef.current !== session) return;
+          if (!(await attachDownloadSubtitles(session, saved))) {
+            if (sessionRef.current === session) {
+              pushDownloadFailure(session, t("player.subtitle_apply_failed"));
+            }
+            return;
+          }
+          void updateNativePlayerSubtitleSearch({
+            status: "applied",
+            results: [],
+          });
+          return;
+        }
         if (downloaded.type === "server") {
           // The subtitle now lives in the server library — re-negotiate the
           // stream so the fresh PlaybackInfo carries it, selected when found.
           // Resume from the live position: playback kept running while the
-          // download and the poll were in flight.
-          const newIndex = await waitForNewServerSubtitle(session, result);
-          if (sessionRef.current !== session) return;
+          // download and the wait for it were in flight.
+          const newIndex = downloaded.stream?.Index ?? undefined;
           if (newIndex === undefined) {
             // Downloaded, but the server hasn't surfaced the stream yet —
             // don't reload into the old selection and call it a success.
@@ -1883,9 +1925,9 @@ const NativePlayerProviderInner: React.FC<{
     },
     [
       replaceStream,
-      waitForNewServerSubtitle,
       pushTrackMenus,
       pushDownloadFailure,
+      attachDownloadSubtitles,
       t,
     ],
   );

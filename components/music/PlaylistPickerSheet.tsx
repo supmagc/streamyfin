@@ -27,6 +27,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Input } from "@/components/common/Input";
 import { Image } from "@/components/common/ServerImage";
 import { Text } from "@/components/common/Text";
+import { SHEET_HANDOFF_DELAY_MS } from "@/constants/Values";
 import { useAddToPlaylist } from "@/hooks/usePlaylistMutations";
 import { useSheetOpenState } from "@/hooks/useSheetOpenState";
 import { apiAtom, userAtom } from "@/providers/JellyfinProvider";
@@ -128,7 +129,7 @@ export const PlaylistPickerSheet: React.FC<Props> = ({
     setOpen(false);
     setTimeout(() => {
       onCreateNew();
-    }, 300);
+    }, SHEET_HANDOFF_DELAY_MS);
   }, [onCreateNew, setOpen]);
 
   const getPlaylistImageUrl = useCallback(

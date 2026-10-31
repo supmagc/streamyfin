@@ -1,3 +1,4 @@
+import type { MediaStream } from "@jellyfin/sdk/lib/generated-client/models";
 import * as Application from "expo-application";
 import { Directory, Paths } from "expo-file-system";
 import { atom, useAtom } from "jotai";
@@ -21,6 +22,7 @@ import { getDownloadedItemSize } from "./Downloads/fileOperations";
 import { useDownloadEventHandlers } from "./Downloads/hooks/useDownloadEventHandlers";
 import { useDownloadOperations } from "./Downloads/hooks/useDownloadOperations";
 import { useDownloadReconciliation } from "./Downloads/hooks/useDownloadReconciliation";
+import { useDownloadSubtitleSync } from "./Downloads/hooks/useDownloadSubtitleSync";
 import { setDownloadLiveActivityEnabled } from "./Downloads/liveActivity";
 import type { JobStatus } from "./Downloads/types";
 import { apiAtom } from "./JellyfinProvider";
@@ -121,6 +123,14 @@ function useDownloadProvider() {
     onDataChange: triggerRefresh,
   });
 
+  const {
+    syncItems: syncSubtitles,
+    syncWhenSaved: syncSubtitlesWhenSaved,
+    takeServerSubtitle,
+  } = useDownloadSubtitleSync({
+    onDataChange: triggerRefresh,
+  });
+
   // Get download operation functions
   const {
     startBackgroundDownload,
@@ -155,6 +165,9 @@ function useDownloadProvider() {
     getDownloadedItemById,
     updateDownloadedItem,
     triggerRefresh,
+    syncSubtitles,
+    syncSubtitlesWhenSaved,
+    takeServerSubtitle,
     APP_CACHE_DOWNLOAD_DIRECTORY: APP_CACHE_DOWNLOAD_DIRECTORY.uri,
     appSizeUsage,
     // Deprecated/not implemented in simple version
@@ -181,6 +194,12 @@ export function useDownload() {
       removeProcess: () => {},
       cancelDownload: async () => {},
       triggerRefresh: () => {},
+      syncSubtitles: async (_itemIds: string[]) => {},
+      syncSubtitlesWhenSaved: async (_itemId: string) => {},
+      takeServerSubtitle: async (
+        _itemId: string,
+        _stream: MediaStream | undefined,
+      ) => false,
       startDownload: async () => {},
       getDownloadedItemSize: () => 0,
       getDownloadedItemById: () => undefined,

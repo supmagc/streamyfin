@@ -33,7 +33,10 @@ import { useTVBackPress } from "@/hooks/useTVBackPress";
 import { useSettings } from "@/utils/atoms/settings";
 import { tvSubtitleModalAtom } from "@/utils/atoms/tvSubtitleModal";
 import { subtitleSearchErrorMessage } from "@/utils/jellyfin/subtitleSearchAccess";
-import { COMMON_SUBTITLE_LANGUAGES } from "@/utils/opensubtitles/api";
+import {
+  defaultSubtitleSearchLanguage,
+  subtitleSearchLanguages,
+} from "@/utils/opensubtitles/api";
 import { scaleSize } from "@/utils/scaleSize";
 import { store } from "@/utils/store";
 
@@ -543,7 +546,9 @@ export default function TVSubtitleModal() {
   const [subtitleDelay, setSubtitleDelay] = useState(
     modalState?.subtitleDelay ?? 0,
   );
-  const [selectedLanguage, setSelectedLanguage] = useState("eng");
+  const [selectedLanguage, setSelectedLanguage] = useState(() =>
+    defaultSubtitleSearchLanguage(settings),
+  );
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [hasSearchedThisSession, setHasSearchedThisSession] = useState(false);
   const [isReady, setIsReady] = useState(false);
@@ -681,13 +686,8 @@ export default function TVSubtitleModal() {
         if (!isMountedRef.current) return;
 
         if (downloadResult.type === "server") {
-          // Give Jellyfin time to process the downloaded subtitle
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-
-          // Check if component is still mounted after the wait
-          if (!isMountedRef.current) return;
-
-          // Refresh tracks and stay open for server-side downloads
+          // The download returns once the server lists the new subtitle, or
+          // gave up waiting for it. Refresh tracks and stay open either way.
           if (modalState?.refreshSubtitleTracks) {
             const newTracks = await modalState.refreshSubtitleTracks();
 
@@ -746,8 +746,8 @@ export default function TVSubtitleModal() {
   );
 
   const displayLanguages = useMemo(
-    () => COMMON_SUBTITLE_LANGUAGES.slice(0, 16),
-    [],
+    () => subtitleSearchLanguages(settings).slice(0, 16),
+    [settings],
   );
 
   const trackOptions = useMemo(() => {

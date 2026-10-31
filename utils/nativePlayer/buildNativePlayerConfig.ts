@@ -41,7 +41,10 @@ import {
   getMpvAudioId,
 } from "@/utils/jellyfin/subtitleUtils";
 import { streamLanguageName } from "@/utils/jellyfin/trackLabel";
-import { COMMON_SUBTITLE_LANGUAGES } from "@/utils/opensubtitles/api";
+import {
+  defaultSubtitleSearchLanguage,
+  subtitleSearchLanguages,
+} from "@/utils/opensubtitles/api";
 import { generateDeviceProfile } from "@/utils/profiles/native";
 import { SEGMENT_SKIP_KEY, SEGMENT_SKIPPED_KEY } from "@/utils/segments";
 import {
@@ -248,36 +251,6 @@ export const buildTrickplayDescriptor = (
 };
 
 /**
- * ISO 639-2/T → /B. Jellyfin's CultureDto.ThreeLetterISOLanguageName carries
- * .NET-style /T codes ("fra", "deu"), while COMMON_SUBTITLE_LANGUAGES and the
- * OpenSubtitles 3→2 mapping use /B codes ("fre", "ger") — an unmapped /T code
- * matches neither the picker nor the fallback search. ron maps to the app
- * list's existing "rom" entry rather than the standard "rum".
- */
-const ISO_639_2_T_TO_B: Record<string, string> = {
-  bod: "tib",
-  ces: "cze",
-  cym: "wel",
-  deu: "ger",
-  ell: "gre",
-  eus: "baq",
-  fas: "per",
-  fra: "fre",
-  hye: "arm",
-  isl: "ice",
-  kat: "geo",
-  mkd: "mac",
-  mri: "mao",
-  msa: "may",
-  mya: "bur",
-  nld: "dut",
-  ron: "rom",
-  slk: "slo",
-  sqi: "alb",
-  zho: "chi",
-};
-
-/**
  * Menu display models for the native track menus. Selection stays in JS —
  * these only carry labels, Jellyfin indices and the requiresReload flag
  * (burned-in subtitle / audio-under-transcode → stream re-negotiation).
@@ -402,6 +375,8 @@ export async function buildNativePlayerConfig(params: {
   originalLabel: string;
   /** Skip the item refetch when the caller already has it (episode switch). */
   item?: BaseItemDto;
+  /** Whether the device has a network, which a download's subtitle search needs. */
+  networkConnected?: boolean;
 }): Promise<{
   config: NativePlayerConfig;
   seed: NativePlayerSessionSeed;
@@ -616,19 +591,15 @@ export async function buildNativePlayerConfig(params: {
       pinchToZoomEnabled: !Platform.isTV && settings.enablePinchToZoom,
       doubleTapToSeekEnabled: !Platform.isTV && settings.enableDoubleTapToSeek,
       confirmExitEnabled: settings.confirmBeforeStoppingPlayback,
-      // Server search needs connectivity; the OpenSubtitles fallback needs
-      // the network either way — offline sessions hide the entry.
-      subtitleSearchEnabled: !offline && !!api,
-      subtitleSearchLanguages: COMMON_SUBTITLE_LANGUAGES.map((l) => ({
+      // Both the server and OpenSubtitles need the network. A download that
+      // plays with one takes what is found into its own files.
+      subtitleSearchEnabled:
+        !!api && (!offline || params.networkConnected === true),
+      subtitleSearchLanguages: subtitleSearchLanguages(settings).map((l) => ({
         code: l.code,
         name: l.name,
       })),
-      subtitleSearchDefaultLanguage: (() => {
-        const raw =
-          settings.defaultSubtitleLanguage?.ThreeLetterISOLanguageName?.toLowerCase();
-        if (!raw) return "eng";
-        return ISO_639_2_T_TO_B[raw] ?? raw;
-      })(),
+      subtitleSearchDefaultLanguage: defaultSubtitleSearchLanguage(settings),
       strings,
     },
   };

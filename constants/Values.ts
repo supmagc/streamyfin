@@ -10,6 +10,10 @@ export const POSTER_CAROUSEL_HEIGHT = 220;
 // which is what tells the user the sheet is a layer and not a new screen.
 export const SHEET_MAX_HEIGHT_RATIO = 0.85;
 
+// How long a sheet opened from another sheet's option waits for that one to
+// finish closing: presented during the other's exit, it can be dropped.
+export const SHEET_HANDOFF_DELAY_MS = 300;
+
 /** A poster's width over its height, as TMDB's artwork is cut. */
 export const POSTER_ASPECT_RATIO = 10 / 15;
 
