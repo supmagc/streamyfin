@@ -34,6 +34,13 @@ const mockNative = {
   },
 };
 
+// providers/Downloads/subtitles.ts, imported for the subtitle sync on a
+// downloaded item, reaches customHeaders and so the real react-native-mmkv.
+jest.mock(
+  "react-native-mmkv",
+  () => jest.requireActual("@/test-utils/mmkv").mmkvModule,
+);
+
 jest.mock("@/modules/mpv-player", () => {
   const done = async () => undefined;
   return {
