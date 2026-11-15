@@ -147,6 +147,7 @@ export const getStreamUrl = async ({
   subtitleStreamIndex = undefined,
   mediaSourceId,
   deviceId,
+  autoOpenLiveStream = true,
 }: {
   api: Api | null | undefined;
   item: BaseItemDto | null | undefined;
@@ -160,6 +161,11 @@ export const getStreamUrl = async ({
   height?: number;
   mediaSourceId?: string | null;
   deviceId?: string | null;
+  /**
+   * Off for a negotiation that plays nothing (the next-episode subtitle warm):
+   * a source that needs opening would be opened and never closed.
+   */
+  autoOpenLiveStream?: boolean;
 }): Promise<{
   url: string | null;
   sessionId: string | null;
@@ -246,7 +252,7 @@ export const getStreamUrl = async ({
     SubtitleStreamIndex: subtitleStreamIndex,
     StartTimeTicks: startTimeTicks,
     isPlayback: true,
-    AutoOpenLiveStream: true,
+    AutoOpenLiveStream: autoOpenLiveStream,
     MaxStreamingBitrate: maxStreamingBitrate,
     AudioStreamIndex: audioStreamIndex,
     MediaSourceId: mediaSourceId,
@@ -330,29 +336,25 @@ export const getDownloadStreamUrl = async ({
     return null;
   }
 
-  const res = await getMediaInfoApi(api).getPlaybackInfo(
-    {
-      itemId: item.Id!,
-    },
-    {
-      method: "POST",
-      data: {
-        userId,
-        deviceProfile: generateDownloadProfile(audioMode, videoCodec),
-        subtitleStreamIndex,
-        startTimeTicks: 0,
-        isPlayback: true,
-        autoOpenLiveStream: true,
-        maxStreamingBitrate,
-        audioStreamIndex,
-        mediaSourceId,
-        ...(mode === "transcode" && {
-          enableDirectPlay: false,
-          enableDirectStream: false,
-        }),
-      },
-    },
-  );
+  const playbackInfoDto: PlaybackInfoRequest = {
+    UserId: userId,
+    DeviceProfile: generateDownloadProfile(audioMode, videoCodec),
+    SubtitleStreamIndex: subtitleStreamIndex,
+    StartTimeTicks: 0,
+    isPlayback: true,
+    AutoOpenLiveStream: true,
+    MaxStreamingBitrate: maxStreamingBitrate,
+    AudioStreamIndex: audioStreamIndex,
+    MediaSourceId: mediaSourceId,
+    ...(mode === "transcode" && {
+      EnableDirectPlay: false,
+      EnableDirectStream: false,
+    }),
+  };
+  const res = await getMediaInfoApi(api).getPostedPlaybackInfo({
+    itemId: item.Id,
+    playbackInfoDto,
+  });
 
   if (res.status !== 200) {
     console.error("Error getting playback info:", res.status, res.statusText);

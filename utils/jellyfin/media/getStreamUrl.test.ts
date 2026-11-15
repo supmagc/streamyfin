@@ -1,10 +1,10 @@
 import { stubReactNative } from "@/test-utils/reactNative";
 
 stubReactNative();
-jest.mock("expo", () => ({
-  // codecSupport probes the native MPV module, which no test environment has.
-  requireOptionalNativeModule: () => null,
-}));
+jest.mock(
+  "expo",
+  () => jest.requireActual("@/test-utils/stubModules").expoWithoutNativeModule,
+);
 
 import type { DownloadMode } from "@/constants/Downloads";
 import { bodyContaining, makeApi } from "@/test-utils/jellyfinApi";
@@ -318,7 +318,7 @@ describe("getDownloadStreamUrl", () => {
     api.mock
       .onPost(
         "https://jellyfin.example.com/Items/item-1/PlaybackInfo",
-        bodyContaining({ enableDirectPlay: false, enableDirectStream: false }),
+        bodyContaining({ EnableDirectPlay: false, EnableDirectStream: false }),
       )
       .reply(200, {
         PlaySessionId: "session-1",
